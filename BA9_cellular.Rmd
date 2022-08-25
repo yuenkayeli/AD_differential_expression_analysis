@@ -1,0 +1,355 @@
+---
+title: "BA9_cellular_DE"
+author: "k2038497"
+date: "2022"
+output: html_document
+---
+
+```{r, message=FALSE,warning=FALSE}
+library('readxl')
+library(DESeq2)
+library("dplyr")
+```
+
+```{r}
+## GENE COUNT DATA
+#load merged_cellular.csv
+cellular_data <- read.delim('/Users/yuenkayeli/ASMHI/ASMHI-MSc-project/merged_cellular.txt', check.names = FALSE)
+cellular_data <- data.frame(cellular_data,row.names = 1)
+colnames(cellular_data) <- gsub(x = colnames(cellular_data), pattern = "\\.", replacement = "-") 
+```
+
+```{r, message=FALSE}
+### META data
+#load meta data and select only BA9 and other factors in separate meta data
+
+meta <- read_excel("/Users/yuenkayeli/ASMHI/ASMHI-MSc-project/TREM2MasterAnnotation.xlsx", sheet = 1)
+#select only BA9, 63  entries
+
+BA9_meta <- subset(meta, Tissue == "BA9", select = c('Sample ID...73', 'Diagnosis_1', 'Sex', 'Age (at death)', 'PostMortemDelay (hours)', 'RIN Score', 'No. of E4 alleles', 'Sequencing Pool', 'Group', 'Braak and Braak stage (modified Braak Stage)'))
+
+
+#remove MCI as it is not AD or control
+BA9_meta <- filter(BA9_meta, Diagnosis_1 != "MCI")
+
+#remove CSF1R+ from Group
+BA9_meta <- filter(BA9_meta, Group !="CSF1R+")
+
+#sort out the row names to match cellular dataframe
+BA9_meta <- data.frame(BA9_meta,row.names = 1)
+row.names(BA9_meta) <- gsub(x = row.names(BA9_meta), pattern = "RDobson", replacement = "RD") 
+
+#rename columns
+colnames(BA9_meta) <- c('Diagnosis','Sex', 'Age.at.death','PostMortemDelay.hours', 'RIN.Score','No.of.E4.alleles','Sequencing.Pool','TREM2.Diagnosis','Braak.stage')
+
+# make TREM2 column only +/-
+BA9_meta$TREM2.Diagnosis<-gsub("TREM2","",as.character(BA9_meta$TREM2.Diagnosis))
+BA9_meta$Sequencing.Pool <- gsub("Pool ","",as.character(BA9_meta$Sequencing.Pool))
+
+```
+
+```{r}
+#match the participant names to select only BA9 in count data
+BA9_data <- cellular_data[intersect(colnames(cellular_data), rownames(BA9_meta))]
+
+#check sample names match in both files
+all(colnames(BA9_data) %in% rownames(BA9_meta))
+all(colnames(BA9_data) == rownames(BA9_meta))
+```
+
+```{r}
+#investigate missingness
+print((colMeans(is.na(BA9_meta)))*100)
+
+# PMD has 40.9% missingness, drop column and use RIN score
+BA9_meta <- subset(BA9_meta, select = -c(PostMortemDelay.hours))
+
+#check 
+print((colMeans(is.na(BA9_meta)))*100)
+```
+
+```{r, warning=FALSE}
+
+library(ggplot2)
+#proportion of case vs controls 
+table(BA9_meta[,('Diagnosis')])
+
+df =data.frame("diagnosis"= c("AD", "Control"), "count"= c(38,24))
+
+# plot pie chart
+pie <- ggplot(df, aes(x="", y= count, fill=diagnosis)) +
+  geom_bar(stat="identity", width=1) +
+  coord_polar("y", start=0) + 
+  geom_text(aes(label=paste0(round(count),"%")), position = position_stack(vjust = 0.5))+
+  scale_fill_manual(values = c("#55DDE0", "#F26419")) +
+  labs(x=NULL, y=NULL, fill= NULL, title = "Proportion of case vs control in BA9")+ 
+  theme_classic()+
+  theme(axis.line = element_blank(), axis.ticks = element_blank(), axis.text = element_blank(), plot.title = element_text(hjust =0.5, color = "#666666") )
+pie
+
+```
+
+```{r}
+# rename to final cellular dataset,to make a copy
+gene_cts <- BA9_data
+dim(gene_cts)
+```
+```{r, warning=FALSE, message=FALSE}
+library(plyr)
+# change TREM2_diagnosis column into factor
+str(BA9_meta)
+
+BA9_meta$Diagnosis <- as.factor(BA9_meta$Diagnosis)
+BA9_meta$Sex <- as.factor(BA9_meta$Sex)
+BA9_meta$TREM2.Diagnosis <- as.factor(BA9_meta$TREM2.Diagnosis)
+BA9_meta$Braak.stage <- as.factor(BA9_meta$Braak.stage)
+BA9_meta$Sequencing.Pool <- as.factor(BA9_meta$Sequencing.Pool)
+
+#revalue +/-
+BA9_meta$TREM2.Diagnosis <- revalue(BA9_meta$TREM2.Diagnosis, c("+"= 'positive'))
+BA9_meta$TREM2.Diagnosis <- revalue(BA9_meta$TREM2.Diagnosis, c("-"= 'negative'))
+```
+
+```{r}
+#make sure the order of rows in metadata is the same as the order of columns in gene_cts
+# ensure the order of RD-1... is the same in both matrixs
+reorder_index <- match(rownames(BA9_meta),colnames(gene_cts))
+gene_cts <- gene_cts[ , reorder_index]
+```
+
+```{r, message=FALSE}
+#construct DESeq dataset
+
+dds_genes <- DESeqDataSetFromMatrix(countData = gene_cts, colData = BA9_meta , design = ~ Sex + Age.at.death + RIN.Score + No.of.E4.alleles + Sequencing.Pool + TREM2.Diagnosis + Braak.stage + Diagnosis)
+
+# perform median-ratios method of normalization, generate size factors 
+# not all genes effect AD equally
+dds_genes <- estimateSizeFactors(dds_genes)
+# view normalization factor applied to each sample
+factors <- sizeFactors(dds_genes)
+
+#normalize and pre-filter , rows have at least 10 reads in total
+idx <- rowSums( counts(dds_genes, normalized=T) >= 5 ) >= 10
+dds_genes <- dds_genes[idx,]
+```
+
+```{r}
+#run PCA
+vsd <- vst(dds_genes, blind = TRUE)
+plotPCA(vsd, intgroup="Sex")
+plotPCA(vsd, intgroup="Age.at.death")
+plotPCA(vsd, intgroup="Diagnosis")
+plotPCA(vsd, intgroup="RIN.Score")
+plotPCA(vsd, intgroup="No.of.E4.alleles")
+plotPCA(vsd, intgroup="TREM2.Diagnosis")
+plotPCA(vsd, intgroup="Braak.stage")
+plotPCA(vsd, intgroup= 'Sequencing.Pool')
+```
+
+```{r}
+# remove outliers and low quality RIN scores, vlaues taken from metadata table
+# remove for BA9 only:
+#'RD-117' : MCI already removed
+#'RD-20': CSF1R + already removed
+# rest are low RIN scores
+#'RD-117','RD-20','RD-26','RD-36','RD-42','RD-52','RD-94','RD-96','RD-97', 'RD-98'
+
+gene_cts<-select(gene_cts, -c('RD-26','RD-36','RD-42','RD-52','RD-94','RD-96','RD-97', 'RD-98'))
+
+row.names.remove <- c('RD-26','RD-36','RD-42','RD-52','RD-94','RD-96','RD-97', 'RD-98')
+BA9_meta <- BA9_meta[!(row.names(BA9_meta) %in% row.names.remove),]
+
+```
+
+```{r, message=FALSE}
+# re-run PCA with outliers removed
+#make sure the order of rows in metadata is the same as the order of columns in gene_cts
+
+dds_genes <- DESeqDataSetFromMatrix(countData = gene_cts, colData = BA9_meta , design = ~ Sex + Age.at.death + RIN.Score + No.of.E4.alleles + Sequencing.Pool + TREM2.Diagnosis + Braak.stage + Diagnosis)
+
+# perform median of ratios method of normalization, generate size factors 
+dds_genes <- estimateSizeFactors(dds_genes)
+
+# view normalization factor applied to each sample
+factors <- sizeFactors(dds_genes)
+
+#normalisation
+idx <- rowSums( counts(dds_genes, normalized=T) >= 5 ) >= 10
+dds_genes <- dds_genes[idx,]
+
+vsd <- vst(dds_genes, blind = TRUE)
+plotPCA(vsd, intgroup="Sex")
+plotPCA(vsd, intgroup="Age.at.death")
+plotPCA(vsd, intgroup="Diagnosis")
+plotPCA(vsd, intgroup="RIN.Score")
+plotPCA(vsd, intgroup="No.of.E4.alleles")
+plotPCA(vsd, intgroup="TREM2.Diagnosis")
+plotPCA(vsd, intgroup="Braak.stage")
+plotPCA(vsd, intgroup= 'Sequencing.Pool')
+```
+
+```{r,warning=FALSE, message=FALSE}
+# run SVA
+# adjusts for unknown and sources of noise, removes batch effects
+
+library("sva")
+dat  <- counts(dds_genes, normalized = TRUE)
+idx  <- rowMeans(dat) > 1
+dat  <- dat[idx, ]
+mod  <- model.matrix(~Sex +Age.at.death + RIN.Score + No.of.E4.alleles + Sequencing.Pool + TREM2.Diagnosis + Braak.stage + Diagnosis, colData(dds_genes))
+mod0 <- model.matrix(~   1, colData(dds_genes))
+nsv <- num.sv(dat,mod)
+nsv
+svseq <- svaseq(dat, mod, mod0, n.sv = nsv)
+dds_genes$SV1 <- svseq$sv
+design(dds_genes) <- ~ Sex +Age.at.death + RIN.Score + No.of.E4.alleles + Sequencing.Pool + TREM2.Diagnosis + Braak.stage + SV1 + Diagnosis
+
+write.table(colData(dds_genes), file = "BA9_cellular.sv1.complete.txt", sep='\t')
+```
+
+```{r, message=FALSE}
+library(rafalib)
+bigpar()
+dds_genes$Diagnosis.int <- as.integer(dds_genes$Diagnosis) + 15
+plot(svseq$sv[,], col=dds_genes$Sequencing.Pool, pch=dds_genes$Diagnosis.int, cex=2,
+     xlab="SV1", ylab="SV2")
+legend("top", levels(dds_genes$Sequencing.Pool), pch=16,
+       col=1:3, cex=.8, ncol=3, title="batch")
+
+```
+
+```{r, warning=FALSE}
+#This performs the actual differential expression by weighting hypotheses to optimize power
+#Modify the filtering criteria to adjust pValue and fold change threshold and write the result table
+ #IHM = independent hypothesis weighting
+
+library("IHW")
+dds_genes <- DESeq(dds_genes)
+resIHW <- results(dds_genes, filterFun=ihw)
+#Only 1 bin; IHW reduces to Benjamini Hochberg (uniform weights)
+metadata(resIHW)$ihwResult
+resIHWOrdered <- resIHW[order(resIHW$pvalue),]
+sum(resIHW$padj < 0.1, na.rm=TRUE)
+
+head(resIHWOrdered,10)
+write.table(resIHWOrdered, "genesDEres.txt",sep="\t")
+
+resFiltered <- subset(resIHWOrdered, padj < 0.1 & abs(log2FoldChange) > 0.5)
+write.table(resFiltered, "genesDEres_P01_FC05.txt",sep="\t",quote=FALSE)
+```
+
+```{r}
+library(EnhancedVolcano)
+
+ba9top5 = c("ENSG00000185745","ENSG00000139725","ENSG00000121060","ENSG00000101844", "ENSG00000114354" )
+
+volBA9ERV<- EnhancedVolcano(resIHW , lab= rownames(resIHW),
+                            title = 'Top 5 BA9 Genes differentially expressed in AD', 
+                            x ='log2FoldChange', y = 'padj', pCutoff = 0.05, FCcutoff = 0.5, selectLab = ba9top5 ,drawConnectors = TRUE, widthConnectors = 0.75)
+
+volBA9ERV
+```
+
+```{r, message=FALSE}
+#volcano plot without ihw filter
+library(EnhancedVolcano)
+# lists the coefficients
+resultsNames(dds_genes)
+res <- results(dds_genes, name="Diagnosis_Control_vs_AD")
+# or to shrink log fold changes association with condition:
+res <- lfcShrink(dds_genes, coef="Diagnosis_Control_vs_AD", type="normal")
+
+EnhancedVolcano(res,lab = rownames(res),x = 'log2FoldChange',y = 'padj')
+EnhancedVolcano(res,lab = rownames(res),x = 'log2FoldChange',pCutoff = 0.05, FCcutoff = 0.5,y = 'padj')
+```
+```{r, message=FALSE}
+library(vidger)
+#these are various plotting functions for after differential expression
+
+#plot one gene
+a <- plotCounts(
+  dds_genes,
+  "ENSG00000185745",
+  intgroup = "Diagnosis",
+  normalized = TRUE,
+  transform = FALSE,
+  xlab = "group",
+  returnData = TRUE,
+  replaced = FALSE,
+)
+
+b <- plotCounts(
+  dds_genes,
+  "ENSG00000139725",
+  intgroup = "Diagnosis",
+  normalized = TRUE,
+  transform = FALSE,
+  xlab = "group",
+  returnData = TRUE,
+  replaced = FALSE,
+)
+
+c <- plotCounts(
+  dds_genes,
+  "ENSG00000121060",
+  intgroup = "Diagnosis",
+  normalized = TRUE,
+  transform = FALSE,
+  xlab = "group",
+  returnData = TRUE,
+  replaced = FALSE,
+)
+
+d <- plotCounts(
+  dds_genes,
+  "ENSG00000101844",
+  intgroup = "Diagnosis",
+  normalized = TRUE,
+  transform = FALSE,
+  xlab = "group",
+  returnData = TRUE,
+  replaced = FALSE,
+)
+
+e <- plotCounts(
+  dds_genes,
+  "ENSG00000114354",
+  intgroup = "Diagnosis",
+  normalized = TRUE,
+  transform = FALSE,
+  xlab = "group",
+  returnData = TRUE,
+  replaced = FALSE,
+)
+ggplot(e, aes(x = Diagnosis, y = count, color = Diagnosis)) + 
+  geom_point(position=position_jitter(w = 0.1,h = 0)) + 
+  theme_bw() +  ggtitle("ENSG00000114354, BA9") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+# plot MA plot 
+plotMA(res, ylim = c(-2, 2))
+```
+```{r}
+# better MAplot
+hl <- c("ENSG00000185745","ENSG00000139725","ENSG00000121060","ENSG00000101844", "ENSG00000114354")
+
+maplot <- vsMAPlot(
+  x = "AD", y = "Control",
+  data = dds_genes, d.factor = "Diagnosis", type = "deseq",
+  padj = 0.05, y.lim = NULL, lfc = NULL, title = TRUE,
+  legend = TRUE, grid = TRUE, data.return = FALSE,  highlight = hl)
+maplot
+```
+
+```{r}
+#top 10 genes
+
+head(resIHW[order(resIHW$padj),],5)
+
+# total number of differentially expressed genes with p-adj <0.05
+print(sum(resIHW$padj < 0.05, na.rm=TRUE))
+
+# save to csv top differnetially expressed gene
+resFilt_ba9_gene <- res[which(resIHW$padj < 0.05),]
+write.csv(resFilt_ba9_gene, file="DE_BA9_gene_results_filtered.csv")
+```

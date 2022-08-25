@@ -1,0 +1,194 @@
+---
+title: "EC_ERV"
+author: "k2038497"
+date: "2022"
+output: html_document
+---
+
+```{r}
+library('readxl')
+library(DESeq2)
+library("dplyr")
+```
+
+```{r setup, include=FALSE}
+#load ERV count data, normalized_erv_counts.txt
+erv_data <- read.delim("/Users/yuenkayeli/ASMHI/ASMHI-MSc-project/normalized_erv_counts2.txt")
+erv_data <- data.frame(erv_data,row.names = 1)
+colnames(erv_data) <- gsub(x = colnames(erv_data), pattern = "\\.", replacement = "-") 
+```
+
+```{r}
+EC_meta <- read.delim("/Users/yuenkayeli/ASMHI/ASMHI-MSc-project/2022/EC_cellular.sv1.complete.txt")
+```
+
+```{r}
+#match the participant names to select only EC in count data
+EC_data <- erv_data[intersect(colnames(erv_data), rownames(EC_meta))]
+
+#check sample names match in both files
+all(colnames(EC_data) %in% rownames(EC_meta))
+all(colnames(EC_data) == rownames(EC_meta))
+```
+
+
+
+```{r}
+# rename to final cellular dataset
+erv_cts <- EC_data
+dim(erv_cts)
+```
+
+```{r}
+#make sure the order of rows in metadata is the same as the order of columns in gene_cts
+# ensure the order of RD-1... is the same in both matrix
+reorder_index <- match(rownames(EC_meta),colnames(erv_cts))
+erv_cts<- erv_cts[ , reorder_index]
+
+```
+
+```{r}
+#construct DESeq dataset
+
+dds_erv <- DESeqDataSetFromMatrix(countData = round(erv_cts), colData = EC_meta , design = ~ Sex + Age.at.death + RIN.Score + No.of.E4.alleles + Sequencing.Pool + TREM2.Diagnosis + Braak.stage + Diagnosis)
+
+#normalize and pre-filter , rows have at least 10 reads in at least 5 people
+idx <- rowSums( counts(dds_erv, normalized=T) >= 5 ) >= 10
+dds_erv <- dds_erv[idx,]
+```
+
+```{r}
+#This performs the actual differential expression
+#Modify the filtering criteria to adjust pValue and fold change threshold and write the result table
+
+library("IHW")
+dds_erv <- DESeq(dds_erv)
+resIHW <- results(dds_erv, filterFun=ihw)
+#Only 1 bin; IHW reduces to Benjamini Hochberg (uniform weights)
+metadata(resIHW)$ihwResult
+resIHWOrdered <- resIHW[order(resIHW$pvalue),]
+sum(resIHW$padj < 0.1, na.rm=TRUE)
+#[1] 256
+head(resIHWOrdered,10)
+write.table(resIHWOrdered, "ervDEres.txt",sep="\t")
+
+resFiltered <- subset(resIHWOrdered, padj < 0.1 & abs(log2FoldChange) > 0.5)
+write.table(resFiltered, "ervDEres_P01_FC05.txt",sep="\t",quote=FALSE)
+```
+
+```{r}
+library(EnhancedVolcano)
+
+ecerv <- c("3518","5337","6122","6078", "2261")
+volECERV<- EnhancedVolcano(resIHW , lab= rownames(resIHW),
+                           title = 'Top 5 EC ERVs differentially expressed in AD',
+                           x ='log2FoldChange', y = 'padj', 
+                           pCutoff = 0.05,
+                           selectLab = ecerv,
+                           FCcutoff = 0.5, 
+                           ylim = c(0, 4),drawConnectors = TRUE, widthConnectors = 0.75)
+
+volECERV
+```
+
+```{r}
+library(EnhancedVolcano)
+# lists the coefficients
+resultsNames(dds_erv)
+res <- results(dds_erv, name="Diagnosis_Control_vs_AD" )
+# or to shrink log fold changes association with condition:
+res <- lfcShrink(dds_erv, coef="Diagnosis_Control_vs_AD" , type="normal")
+
+EnhancedVolcano(res,lab = rownames(res),x = 'log2FoldChange',y = 'padj')
+EnhancedVolcano(res,lab = rownames(res),x = 'log2FoldChange',pCutoff = 0.05, FCcutoff = 0.5,y = 'padj', ylim = c(0, 4))
+```
+```{r}
+library(vidger)
+#these are various plotting functions for after differential expression
+
+#plot one gene
+a <- plotCounts(
+  dds_erv,
+  "3518",
+  intgroup = "Diagnosis",
+  normalized = TRUE,
+  transform = FALSE,
+  xlab = "group",
+  returnData = TRUE,
+  replaced = FALSE,
+)
+
+b <- plotCounts(
+  dds_erv,
+  "5337",
+  intgroup = "Diagnosis",
+  normalized = TRUE,
+  transform = FALSE,
+  xlab = "group",
+  returnData = TRUE,
+  replaced = FALSE,
+)
+
+c <- plotCounts(
+  dds_erv,
+  "6122",
+  intgroup = "Diagnosis",
+  normalized = TRUE,
+  transform = FALSE,
+  xlab = "group",
+  returnData = TRUE,
+  replaced = FALSE,
+)
+
+d <- plotCounts(
+  dds_erv,
+  "6078",
+  intgroup = "Diagnosis",
+  normalized = TRUE,
+  transform = FALSE,
+  xlab = "group",
+  returnData = TRUE,
+  replaced = FALSE,
+)
+
+e <- plotCounts(
+  dds_erv,
+  "2261",
+  intgroup = "Diagnosis",
+  normalized = TRUE,
+  transform = FALSE,
+  xlab = "group",
+  returnData = TRUE,
+  replaced = FALSE,
+)
+
+ggplot(e, aes(x = Diagnosis, y = count, color = Diagnosis)) +
+  geom_point(position=position_jitter(w = 0.1,h = 0)) +
+  theme_bw() +  ggtitle("ERV loci: 2261, EC" ) + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+plotMA(res, ylim = c(-2, 2))
+```
+```{r}
+# better MAplot
+hl <- c("3518","5337","6122","6078", "2261")
+
+maplot <- vsMAPlot(
+  x = "AD", y = "Control",
+  data = dds_erv, d.factor = "Diagnosis", type = "deseq",
+  padj = 0.05, y.lim = NULL, lfc = NULL, title = TRUE,
+  legend = TRUE, grid = TRUE, data.return = FALSE,  highlight = hl)
+maplot
+```
+
+```{r}
+#top 5 erv
+head(resIHW[order(resIHW$padj),], 5)
+
+# total number of differentially expressed erv with p-adj <0.05
+print(sum(resIHW$padj < 0.05, na.rm=TRUE))
+
+# save to csv top differnetiall expressed ERV
+resFilt_ec_erv <- res[which(resIHW$padj < 0.05),]
+write.csv(resFilt_ec_erv, file="DE_EC_ERV_results_filtered.csv")
+```
